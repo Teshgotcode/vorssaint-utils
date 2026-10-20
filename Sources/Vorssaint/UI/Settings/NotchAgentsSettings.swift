@@ -51,6 +51,10 @@ struct NotchAgentsSettingsControls: View {
             providerRow(.opencode, isOn: $opencode)
             providerRow(.copilot, isOn: $copilot)
             providerRow(.hermes, isOn: $hermes)
+            if hermes {
+                Text(FeatureStrings.hermesUsageNote(l10n.language).note)
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if codex { CodexAccountsSettings() }
 
             Divider()
@@ -156,7 +160,7 @@ struct NotchAgentsSettingsControls: View {
         .onChange(of: claude) { _, on in if on { findClaudeApp() } }
         // Cards and agents set the page's height, and the live reading the
         // closed island's width, which the island follows.
-        .onChange(of: [cardOrder, hiddenCards, String(claude), String(codex), String(opencode), String(copilot),
+        .onChange(of: [cardOrder, hiddenCards, String(claude), String(codex), String(opencode), String(copilot), String(hermes),
                        String(liveActivity), readout, limitDisplay, limitFocus]) { _, _ in
             NotchService.shared.syncWithPreferences()
         }

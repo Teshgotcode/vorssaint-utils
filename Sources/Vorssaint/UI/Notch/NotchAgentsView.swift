@@ -35,7 +35,8 @@ struct NotchAgentsView: View {
     private var providers: [AgentProvider] {
         [claude ? AgentProvider.claude : nil, codex ? .codex : nil, opencode ? .opencode : nil, copilot ? .copilot : nil,
          hermes ? .hermes : nil].compactMap { $0 }
-            .filter { usage.snapshot.seen.contains($0) || ($0 == .codex && !codexAccounts.isEmpty) }
+            .filter { usage.snapshot.seen.contains($0) || ($0 == .codex && !codexAccounts.isEmpty)
+                || ($0 == .hermes && (usage.hermesAccount != nil || usage.hermesAccountChecking || usage.hermesAccountFailure != nil)) }
     }
 
     private var rows: [[NotchAgentTile]] {
@@ -120,6 +121,7 @@ struct NotchAgentsView: View {
             }
         case .spend:
             NotchAgentSpendCard(snapshot: snapshot, providers: providers, period: shown, text: text)
+                .help(providers.contains(.hermes) ? FeatureStrings.hermesUsageNote(l10n.language).note : text.valueNote)
         case .live:
             NotchAgentLiveCard(snapshot: snapshot, providers: providers, text: text)
         case .trend:
@@ -138,6 +140,15 @@ struct NotchAgentsView: View {
     }
 
     private func account(_ tile: NotchAgentTile, now: Date) -> NotchAgentAccount? {
+        if tile.provider == .hermes {
+            let reading = usage.hermesAccount?.current(at: now)
+            return NotchAgentAccount(name: usage.hermesAccount?.provider ?? "Hermes CLI", limits: reading?.limits,
+                plan: reading?.plan, checking: usage.hermesAccountChecking,
+                failure: usage.hermesAccountFailure != nil || (usage.hermesAccount != nil && reading == nil)
+                    ? text.waitingForLimits : nil,
+                refreshHint: text.waitingForLimits, checkLabel: FeatureStrings.codexAccounts(l10n.language).check,
+                refresh: { usage.refreshHermesLimits(force: true) }, details: reading?.details ?? [])
+        }
         guard let id = tile.accountID, let state = codexAccounts.first(where: { $0.id == id }) else { return nil }
         let strings = FeatureStrings.codexAccounts(l10n.language)
         let failure = state.failure.map { failure -> String in
@@ -183,6 +194,7 @@ private struct NotchAgentAccount {
     let refreshHint: String
     let checkLabel: String
     let refresh: () -> Void
+    var details: [String] = []
 }
 
 private struct NotchAgentLimitsCard: View {
@@ -207,6 +219,10 @@ private struct NotchAgentLimitsCard: View {
 
     /// Two rows fit: the session and whichever longer window binds first.
     private var windows: [AgentLimitWindow] {
+        if provider == .hermes {
+            return Array((limits?.windows ?? []).filter { $0.resetsAt.map { $0 > now } ?? true }
+                .sorted { $0.usedPercent > $1.usedPercent }.prefix(2))
+        }
         let all = (limits?.windows ?? []).map { AgentLimitSupport.current($0, at: now) }
         let session = all.first { $0.kind == .session }
         let longer = all.filter { $0.kind != .session }.max { $0.usedPercent < $1.usedPercent }
@@ -246,9 +262,13 @@ private struct NotchAgentLimitsCard: View {
                         updated: limits.map { text.updated($0.observedAt.formatted(
                             .relative(presentation: .named, unitsStyle: .abbreviated).locale(locale))) })
                     if let placeholder = notes.placeholder {
-                        Text(placeholder).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                        Text(account.details.first ?? placeholder).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                     }
                     if !windows.isEmpty { meters(windows) }
+                    if !windows.isEmpty, let detail = account.details.first {
+                        Text(detail).font(.system(size: 8.5)).foregroundStyle(.secondary).lineLimit(1)
+                            .help(account.details.joined(separator: "\n"))
+                    }
                     // What went wrong since the reading shown, or how old it is.
                     if let note = notes.caption {
                         Text(note)
@@ -265,6 +285,9 @@ private struct NotchAgentLimitsCard: View {
             }
         }
         .accessibilityElement(children: .combine)
+        .help(provider == .hermes ? (limits?.windows ?? []).map {
+            "\($0.scope ?? "") · \(AgentFormat.percent($0.remainingFraction)) · \($0.resetsAt?.formatted() ?? "—")"
+        }.joined(separator: "\n") : "")
     }
 
     private func meters(_ windows: [AgentLimitWindow]) -> some View {
@@ -479,13 +502,15 @@ private struct NotchAgentSpendCard: View {
                     if period == .month { multiples(usage) }
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text((usage.fullyPriced ? "" : "≥ ") + AgentFormat.cost(usage.total.cost))
+                    Text(usage.total.cost == 0 && usage.total.unpriced > 0
+                         ? text.tokens(AgentFormat.tokens(usage.total.tokens.total))
+                         : (usage.fullyPriced ? "" : "≥ ") + AgentFormat.cost(usage.total.cost))
                         .font(.system(size: 22, weight: .medium, design: .rounded))
                         .monospacedDigit()
                         .contentTransition(.numericText())
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
-                    Text(text.apiValue)
+                    Text(usage.total.cost == 0 && usage.total.unpriced > 0 ? "" : text.apiValue)
                         .font(.system(size: 9.5))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
