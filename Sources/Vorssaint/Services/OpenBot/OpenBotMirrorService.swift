@@ -347,8 +347,8 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             case .failure:
                 DispatchQueue.main.async {
                     if self.phase != .idle, self.panel?.isVisible == true {
-                        reconnectAttempts += 1
-                        if reconnectAttempts > 3 {
+                        self.reconnectAttempts += 1
+                        if self.reconnectAttempts > 3 {
                             self.phase = .failed("Koblingen til OpenBot falt")
                             return
                         }
@@ -548,7 +548,7 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
             let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error)
-            value = descriptor.flatMap { Int($0.intValue) }
+            value = descriptor.flatMap { Int(truncatingIfNeeded: $0.int32Value) }
             semaphore.signal()
         }
         semaphore.wait()
