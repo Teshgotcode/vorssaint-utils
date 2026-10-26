@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vorssaint
 
 import AppKit
+import ApplicationServices
 import Carbon.HIToolbox
 import Foundation
 import ImageIO
@@ -184,29 +185,60 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
 
     /// Places OpenBot's own window one pixel behind this one, so it keeps
     /// painting while staying invisible, and its viewport matches the mirror.
+    /// The window is moved through the accessibility API the window layout
+    /// uses — no AppleScript, no System Events, no automation permission.
     private func syncBounds() {
         guard let panel, panel.isVisible else { return }
         let frame = panel.frame
         guard let screen = NSScreen.screens.first(where: {
             $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
         }) ?? NSScreen.main else { return }
-        let topLeftX = frame.minX
-        // AppleScript counts from the screen's top; AppKit from its bottom.
-        let topLeftY = screen.frame.maxY - frame.maxY + Self.sliver
-        let width = frame.width
-        // The mirrored window carries no title bar; its content is the page.
-        let height = frame.height
-        runAppleScript("""
-        tell application "System Events" to tell process "OpenBot"
-            set position of window 1 to {\(Int(topLeftX)), \(Int(topLeftY))}
-            set size of window 1 to {\(Int(width)), \(Int(height))}
-        end tell
-        """)
+        // Accessibility counts from the screen's top; AppKit from its bottom.
+        let topLeft = CGPoint(x: frame.minX,
+                              y: screen.frame.maxY - frame.maxY + Self.sliver)
+        setOpenBotWindow(position: topLeft,
+                         size: CGSize(width: frame.width, height: frame.height))
+    }
+
+    /// OpenBot's first window, through the accessibility API.
+    private func openBotWindow() -> AXUIElement? {
+        guard let app = openBotApp else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return nil }
+        return windows.first
+    }
+
+    /// Moves OpenBot's window in the accessibility coordinate system, whose
+    /// origin is the top-left of the main display. The accessibility calls
+    /// can stall on a busy app, so they never run on the main thread.
+    private func setOpenBotWindow(position: CGPoint, size: CGSize) {
+        queue.async { [self] in
+            guard let window = openBotWindow() else { return }
+            var point = position
+            var extent = size
+            AXUIElementSetAttributeValue(window,
+                                         kAXPositionAttribute as CFString,
+                                         AXValueCreate(.cgPoint, &point))
+            AXUIElementSetAttributeValue(window,
+                                         kAXSizeAttribute as CFString,
+                                         AXValueCreate(.cgSize, &extent))
+        }
     }
 
     private func setOpenBotWindow(hidden: Bool) {
-        let visible = hidden ? "false" : "true"
-        runAppleScript("tell application \"System Events\" to set visible of process \"OpenBot\" to \(visible)")
+        guard let app = openBotApp else { return }
+        if hidden {
+            app.hide()
+        } else {
+            app.unhide()
+        }
+    }
+
+    /// The running OpenBot, whatever context asks for it.
+    private var openBotApp: NSRunningApplication? {
+        NSRunningApplication.runningApplications(withBundleIdentifier: Self.appBundleID).first
     }
 
     // MARK: - Connection
@@ -244,9 +276,9 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     private func launchWithDebugger() {
         phase = .launching
         let openBotRunning = NSRunningApplication.runningApplications(withBundleIdentifier: Self.appBundleID).first != nil
-        if openBotRunning {
+        if let app = openBotApp {
             isQuittingOpenBot = true
-            runAppleScript("tell application \"OpenBot\" to quit")
+            app.terminate()
         }
         queue.async { [self] in
             if openBotRunning {
@@ -530,9 +562,7 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             self.syncBounds()
         }
         queue.async { [self] in
-            let count = Self.appleScriptInt(
-                "tell application \"System Events\" to count windows of process \"OpenBot\"")
-            if count == nil || count == 0 {
+            if openBotWindow() == nil {
                 let reopen = Process()
                 reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
                 reopen.arguments = ["-g", "-a", "OpenBot"]
@@ -546,36 +576,12 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         }
     }
 
-    /// Runs one AppleScript off the main thread and returns its number.
-    private static func appleScriptInt(_ source: String) -> Int? {
-        let semaphore = DispatchSemaphore(value: 0)
-        var value: Int?
-        DispatchQueue.global(qos: .userInitiated).async {
-            var error: NSDictionary?
-            let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error)
-            value = descriptor.flatMap { Int(truncatingIfNeeded: $0.int32Value) }
-            semaphore.signal()
-        }
-        semaphore.wait()
-        return value
-    }
-
     // MARK: - Helpers
 
     private func wait(for condition: () -> Bool, timeout: TimeInterval) {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !condition() {
             Thread.sleep(forTimeInterval: 0.2)
-        }
-    }
-
-    private func runAppleScript(_ source: String) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-            process.arguments = ["-e", source]
-            try? process.run()
-            process.waitUntilExit()
         }
     }
 
