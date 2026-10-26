@@ -134,6 +134,7 @@ final class OpenBotMirrorSurface: NSView {
     override func layout() {
         super.layout()
         updateTrackingArea()
+        service?.setViewport(width: Double(bounds.width), height: Double(bounds.height))
         if let image = currentFrame, deviceWidth > 0 {
             displayFrame(image, viewportWidth: deviceWidth, viewportHeight: deviceHeight)
         }
@@ -168,11 +169,12 @@ final class OpenBotMirrorSurface: NSView {
     // MARK: - Coordinates
 
     /// DevTools input counts in CSS pixels from the page's top-left corner;
-    /// AppKit hands out points from the view's bottom-left.
+    /// AppKit hands out points from the view's bottom-left. The mirrored
+    /// page is rendered at exactly this view's size, so the ratio is 1:1
+    /// whenever the stream has caught up with the latest override.
     private var cssScale: Double {
-        let backing = Double(window?.backingScaleFactor ?? 2)
-        let cssWidth = deviceWidth > 0 ? deviceWidth / backing : Double(bounds.width)
-        return bounds.width > 0 ? cssWidth / Double(bounds.width) : 1
+        guard bounds.width > 0 else { return 1 }
+        return deviceWidth > 0 ? deviceWidth / Double(bounds.width) : 1
     }
 
     private func cssPoint(from event: NSEvent) -> (x: Double, y: Double) {
