@@ -329,8 +329,8 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
                 DispatchQueue.main.async {
                     if self.phase != .idle, self.panel?.isVisible == true {
                         self.phase = .failed("Koblingen til OpenBot falt")
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
-                            if panel?.isVisible == true { begin() }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            if self.panel?.isVisible == true { self.begin() }
                         }
                     }
                 }
