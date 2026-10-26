@@ -218,12 +218,16 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             guard let window = openBotWindow() else { return }
             var point = position
             var extent = size
-            AXUIElementSetAttributeValue(window,
-                                         kAXPositionAttribute as CFString,
-                                         AXValueCreate(.cgPoint, &point))
-            AXUIElementSetAttributeValue(window,
-                                         kAXSizeAttribute as CFString,
-                                         AXValueCreate(.cgSize, &extent))
+            if let pointValue = AXValueCreate(.cgPoint, &point) {
+                AXUIElementSetAttributeValue(window,
+                                             kAXPositionAttribute as CFString,
+                                             pointValue)
+            }
+            if let extentValue = AXValueCreate(.cgSize, &extent) {
+                AXUIElementSetAttributeValue(window,
+                                             kAXSizeAttribute as CFString,
+                                             extentValue)
+            }
         }
     }
 
