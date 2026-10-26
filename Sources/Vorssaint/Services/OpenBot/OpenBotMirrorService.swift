@@ -520,7 +520,9 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     /// without activating the app).
     private func ensureOpenBotWindow() {
         let restore: () -> Void = { [weak self] in
-            guard let self else { return }
+            // A card the user already closed owns the screen again: showing
+            // OpenBot's window now would strand it on the desktop.
+            guard let self, self.panel?.isVisible == true else { return }
             self.setOpenBotWindow(hidden: false)
             self.syncBounds()
         }
