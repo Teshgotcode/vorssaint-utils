@@ -304,6 +304,9 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
 
     private func attach(to url: URL) {
         reconnectAttempts = 0
+        // A card that closed and opened again leaves the old stream socket
+        // behind; cancel it or the page paints into two connections.
+        socket?.cancel(with: .goingAway, reason: nil)
         let task = URLSession.shared.webSocketTask(with: url)
         socket = task
         task.resume()
