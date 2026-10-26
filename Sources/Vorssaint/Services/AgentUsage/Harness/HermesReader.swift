@@ -61,9 +61,19 @@ struct HermesReader: AgentHarnessReader {
             guard sessionState.turnOpen else { return [] }
             entries.append(.turnActive(date))
         case "assistant":
-            // shortcut: every finish a reply can carry ends its turn except tool_calls; a finish
-            // reason Hermes adds later needs a case here, <when one exists>.
-            if let finish = json["finish"] as? String, finish != "tool_calls" {
+            // shortcut: only tool_calls keeps a turn going; every other finish ends it, and a
+            // reply saved with no finish at all is an error or an interrupted turn, <when Hermes keeps working through one>.
+            if json["finish"] as? String == "tool_calls" {
+                if sessionState.turnOpen {
+                    entries.append(.turnActive(date))
+                } else {
+                    // The reading window began mid-turn: the reply being written
+                    // is work going on all the same.
+                    sessionState.turnOpen = true
+                    sessionState.turnStarted = date
+                    entries.append(.turnBegan(date))
+                }
+            } else {
                 guard sessionState.turnOpen else { return [] }
                 var duration: TimeInterval?
                 if let started = sessionState.turnStarted, date >= started {
@@ -72,14 +82,6 @@ struct HermesReader: AgentHarnessReader {
                 sessionState.turnOpen = false
                 sessionState.turnStarted = nil
                 entries.append(.turnEnded(date, completed: true, duration: duration))
-            } else if sessionState.turnOpen {
-                entries.append(.turnActive(date))
-            } else {
-                // The reading window began mid-turn: the reply being written
-                // is work going on all the same.
-                sessionState.turnOpen = true
-                sessionState.turnStarted = date
-                entries.append(.turnBegan(date))
             }
         default:
             return []

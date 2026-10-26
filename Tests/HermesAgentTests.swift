@@ -28,10 +28,18 @@ enum HermesAgentTests {
                      "a finished reply ends the turn with its real duration")
         suite.expect(reader.parse(tool, state: &state, now: began).isEmpty,
                      "a tool result outside a turn is nothing")
-        let streaming = line(#"{"id":"5","session_id":"s","role":"assistant","time_created":1790088200}"#)
+        let streaming = line(#"{"id":"5","session_id":"s","role":"assistant","time_created":1790088200,"finish":"tool_calls"}"#)
         suite.expect(reader.parse(streaming, state: &state, now: began).last
                         == .turnBegan(Date(timeIntervalSince1970: 1_790_088_200)),
                      "a reply that arrives without a prompt, as one written when the reading began, opens a turn")
+        let failed = line(#"{"id":"8","session_id":"s","role":"assistant","time_created":1790088290}"#)
+        suite.expect(reader.parse(failed, state: &state, now: began).last
+                        == .turnEnded(Date(timeIntervalSince1970: 1_790_088_290), completed: true, duration: 90),
+                     "a reply cut off without a finish, as when the app quits mid-turn, ends the turn")
+        let error = line(#"{"id":"9","session_id":"s","role":"assistant","time_created":1790088295}"#)
+        suite.expect(reader.parse(error, state: &state, now: began).isEmpty
+                        && state.hermesSessions["s"]?.turnOpen == false,
+                     "an error reply saved without a finish opens no turn of its own")
         let meta = line(#"{"id":"6","session_id":"s","role":"session_meta","time_created":1790088210}"#)
         suite.expect(reader.parse(meta, state: &state, now: began).isEmpty,
                      "session metadata holds no turn")
