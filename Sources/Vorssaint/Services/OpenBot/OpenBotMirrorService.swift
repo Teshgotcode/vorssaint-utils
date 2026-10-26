@@ -13,11 +13,14 @@ import SwiftUI
 /// frame by frame into this surface, and the mouse, wheel and keys Vorssaint
 /// receives are dispatched straight back into the page.
 ///
-/// OpenBot's own window is never on the screen at all. The app is launched
-/// with the Chromium switches that keep a backgrounded renderer painting,
-/// so its window stays hidden the whole time and still produces frames;
-/// the page is rendered at the card's size through a metrics override,
-/// which also makes the stream's viewport match the card exactly.
+/// OpenBot's own window never stands alone on the screen. Each time the
+/// service brings the app up it writes the app's window-state file first,
+/// parking the window one pixel behind the card — enough of it stays
+/// uncovered that macOS never marks it occluded, so it keeps painting,
+/// while the card covers the rest. The page itself is rendered at the
+/// card's size through a metrics override, and while the card is closed
+/// the app is simply hidden: a hidden renderer freezes, and unhiding it
+/// when the card opens again picks the stream straight back up.
 final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     static let shared = OpenBotMirrorService()
 
@@ -48,7 +51,6 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     private var overrideWidth: Double = 980
     private var overrideHeight: Double = 620
     private var viewportSyncPending: DispatchWorkItem?
-    private var keepHiddenTimer: Timer?
     private var reconnectAttempts = 0
     private var outsideClickMonitor: Any?
     private let queue = DispatchQueue(label: "com.vorssaint.openbot.mirror")
@@ -103,10 +105,6 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             context.duration = 0.13
             panel.animator().alphaValue = 1
         }
-        // The real window must never surface; a freshly launched OpenBot can
-        // put one up while the stream is still settling, so keep tucking it
-        // away while the card is open.
-        ensureKeepHidden()
         begin(initial: true)
     }
 
@@ -115,9 +113,9 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         removeMonitors()
         panel?.orderOut(nil)
         isPinned = false
-        stopKeepHidden()
         // Nothing mirrors while the card is closed, and the app's own
-        // window must never appear on the desktop.
+        // window must never appear on the desktop. The hidden renderer
+        // freezes; unhiding on the next opening resumes it.
         send("Page.stopScreencast")
         hideOpenBotApp()
     }
@@ -179,25 +177,45 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         NSRunningApplication.runningApplications(withBundleIdentifier: Self.appBundleID).first
     }
 
-    /// OpenBot's own window is never part of the show: the app stays hidden
-    /// the whole time, and the switches it was launched with keep the hidden
-    /// renderer painting frames for the stream. No accessibility grant, no
-    /// automation prompt — hiding an app needs neither.
+    /// OpenBot's own window is never part of the show: the app is tucked
+    /// away whenever the card is not streaming it. No accessibility grant,
+    /// no automation prompt — hiding an app needs neither.
     private func hideOpenBotApp() {
         guard let app = openBotApp, !app.isHidden else { return }
         app.hide()
     }
 
-    private func ensureKeepHidden() {
-        guard keepHiddenTimer == nil else { return }
-        keepHiddenTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            self?.hideOpenBotApp()
-        }
+    /// The card's frame in the coordinate system OpenBot's window-state
+    /// file uses: points from the top-left of the display, with one pixel
+    /// of width to spare so the parked window is never fully covered.
+    private func parkedFrame() -> CGRect? {
+        guard let panel else { return nil }
+        let frame = panel.frame
+        guard let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
+        }) ?? NSScreen.main else { return nil }
+        return CGRect(x: frame.minX,
+                      y: screen.frame.maxY - frame.maxY,
+                      width: frame.width + 1,
+                      height: frame.height)
     }
 
-    private func stopKeepHidden() {
-        keepHiddenTimer?.invalidate()
-        keepHiddenTimer = nil
+    /// OpenBot reads its window bounds back from a state file whenever it
+    /// launches and clamps them to the work area, so writing that file
+    /// while nothing runs parks the app's window behind the card — no
+    /// accessibility, no automation, nothing but a file the app owns.
+    private func parkOpenBotWindow(at frame: CGRect) {
+        guard frame.width > 0, frame.height > 0 else { return }
+        let state: [String: Any] = ["version": 1,
+                                    "x": Int(frame.minX),
+                                    "y": Int(frame.minY),
+                                    "width": Int(frame.width),
+                                    "height": Int(frame.height)]
+        guard let data = try? JSONSerialization.data(withJSONObject: state) else { return }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                               in: .userDomainMask)[0]
+        let file = support.appendingPathComponent("OpenBot/openbot-main-window-state-v1.json")
+        try? data.write(to: file)
     }
 
     // MARK: - Connection
@@ -234,6 +252,8 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     /// relaunched; its state lives on disk, so nothing is lost.
     private func launchWithDebugger() {
         phase = .launching
+        // Park the app's window where the card is about to stream it from.
+        let park = parkedFrame()
         let openBotRunning = NSRunningApplication.runningApplications(withBundleIdentifier: Self.appBundleID).first != nil
         if let app = openBotApp {
             app.terminate()
@@ -242,6 +262,11 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             if openBotRunning {
                 wait(for: { NSRunningApplication.runningApplications(withBundleIdentifier: Self.appBundleID).isEmpty },
                      timeout: 12)
+            }
+            // The old instance flushes its live bounds on quit, so the park
+            // only lands once nothing is left to overwrite it.
+            if let park {
+                parkOpenBotWindow(at: park)
             }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -322,6 +347,11 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         socket = task
         task.resume()
         receive()
+        // A window the card previously tucked away has to come back for
+        // the stream: a hidden renderer freezes, and unhiding resumes it.
+        if let app = openBotApp, app.isHidden {
+            app.unhide()
+        }
         send("Page.enable") { [weak self] _ in
             self?.suppressOpenBotIsland()
             // The page renders at the card's size, whatever window it lives
@@ -329,7 +359,6 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             self?.syncViewport()
             self?.startScreencast()
         }
-        hideOpenBotApp()
     }
 
     private func disconnect() {
