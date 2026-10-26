@@ -50,6 +50,8 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     private var viewportHeight: Double = 820
     private var boundsSyncPending: DispatchWorkItem?
     private var isQuittingOpenBot = false
+    private var reconnectAttempts = 0
+    private var outsideClickMonitor: Any?
     private let queue = DispatchQueue(label: "com.vorssaint.openbot.mirror")
     private let hotkey = QuickToolHotkey(id: 19)
 
@@ -90,6 +92,11 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }) {
             center(panel)
         }
+        // Every opening starts as a card that steps aside on a click outside,
+        // the way the rest of Vorssaint's pads behave; one click on the pin
+        // keeps it floating instead.
+        isPinned = false
+        installMonitors(for: panel)
         panel.alphaValue = 0
         panel.orderFrontRegardless()
         panel.makeKey()
@@ -97,11 +104,12 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             context.duration = 0.13
             panel.animator().alphaValue = 1
         }
-        begin()
+        begin(initial: true)
     }
 
     func hide() {
         guard panel != nil else { return }
+        removeMonitors()
         panel?.orderOut(nil)
         isPinned = false
         // Nothing mirrors while the pad is closed, and the app's own window
@@ -203,14 +211,19 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
 
     // MARK: - Connection
 
-    private func begin() {
+    /// The card's own opening may bring OpenBot up with the debugger port;
+    /// an automatic reconnect after a dropped socket never relaunches the
+    /// app, it only re-attaches while the port stays open.
+    private func begin(initial: Bool) {
         queue.async { [self] in
             portIsOpen { open in
                 DispatchQueue.main.async { [self] in
                     if open {
                         connect()
-                    } else {
+                    } else if initial {
                         launchWithDebugger()
+                    } else {
+                        phase = .failed("OpenBot kjører ikke")
                     }
                 }
             }
@@ -290,6 +303,7 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
     }
 
     private func attach(to url: URL) {
+        reconnectAttempts = 0
         let task = URLSession.shared.webSocketTask(with: url)
         socket = task
         task.resume()
@@ -298,6 +312,11 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             self?.readViewport()
             self?.suppressOpenBotIsland()
             self?.startScreencast()
+            // The mirrored window is part of the card's own opening: bring
+            // it on screen (a relaunch may still be settling), then place it
+            // behind the card so the stream has a page to paint.
+            self?.ensureOpenBotWindow()
+            self?.syncBounds()
         }
     }
 
@@ -328,9 +347,13 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
             case .failure:
                 DispatchQueue.main.async {
                     if self.phase != .idle, self.panel?.isVisible == true {
-                        self.phase = .failed("Koblingen til OpenBot falt")
+                        reconnectAttempts += 1
+                        if reconnectAttempts > 3 {
+                            self.phase = .failed("Koblingen til OpenBot falt")
+                            return
+                        }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                            if self.panel?.isVisible == true { self.begin() }
+                            if self.panel?.isVisible == true { self.begin(initial: false) }
                         }
                     }
                 }
@@ -465,6 +488,71 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
 
     func insertText(_ text: String) {
         send("Input.insertText", params: ["text": text])
+    }
+
+    // MARK: - Outside clicks
+
+    /// The card steps aside on a click anywhere outside it, unless the pin
+    /// holds it up — the pad behaviour every other Vorssaint card follows.
+    private func installMonitors(for panel: NSPanel) {
+        guard outsideClickMonitor == nil else { return }
+        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        ) { [weak self] _ in
+            guard let self, let panel = self.panel, panel.isVisible, !self.isPinned else { return }
+            if !panel.frame.contains(NSEvent.mouseLocation) {
+                self.hide()
+            }
+        }
+    }
+
+    private func removeMonitors() {
+        if let outsideClickMonitor {
+            NSEvent.removeMonitor(outsideClickMonitor)
+        }
+        outsideClickMonitor = nil
+    }
+
+    // MARK: - The mirrored window
+
+    /// Unhides OpenBot's own window, and asks LaunchServices for a reopen
+    /// when the app runs without one (a plain reopen shows the main window
+    /// without activating the app).
+    private func ensureOpenBotWindow() {
+        let restore: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.setOpenBotWindow(hidden: false)
+            self.syncBounds()
+        }
+        queue.async { [self] in
+            let count = Self.appleScriptInt(
+                "tell application \"System Events\" to count windows of process \"OpenBot\"")
+            if count == nil || count == 0 {
+                let reopen = Process()
+                reopen.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                reopen.arguments = ["-g", "-a", "OpenBot"]
+                try? reopen.run()
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.5) {
+                    DispatchQueue.main.async { restore() }
+                }
+            } else {
+                DispatchQueue.main.async { restore() }
+            }
+        }
+    }
+
+    /// Runs one AppleScript off the main thread and returns its number.
+    private static func appleScriptInt(_ source: String) -> Int? {
+        let semaphore = DispatchSemaphore(value: 0)
+        var value: Int?
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: NSDictionary?
+            let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error)
+            value = descriptor.flatMap { Int($0.intValue) }
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return value
     }
 
     // MARK: - Helpers
