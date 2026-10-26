@@ -29,7 +29,6 @@ struct OpenBotMirrorView: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         )
-        .overlay(ScratchpadResizeOverlay())
     }
 
     private var header: some View {
@@ -112,6 +111,7 @@ final class OpenBotMirrorSurface: NSView {
     weak var service: OpenBotMirrorService?
     private var deviceWidth: Double = 0
     private var deviceHeight: Double = 0
+    private var currentFrame: CGImage?
 
     override var acceptsFirstResponder: Bool { true }
     override var canBecomeKeyView: Bool { true }
@@ -134,7 +134,7 @@ final class OpenBotMirrorSurface: NSView {
     override func layout() {
         super.layout()
         updateTrackingArea()
-        if let image = layer?.contents as? CGImage, deviceWidth > 0 {
+        if let image = currentFrame, deviceWidth > 0 {
             displayFrame(image, viewportWidth: deviceWidth, viewportHeight: deviceHeight)
         }
     }
@@ -146,7 +146,7 @@ final class OpenBotMirrorSurface: NSView {
             removeTrackingArea(area)
         }
         let area = NSTrackingArea(rect: .zero,
-                                  options: [.mouseMovedAndExited, .activeAlways, .inVisibleRect],
+                                  options: [.mouseMoved, .activeAlways, .inVisibleRect],
                                   owner: self,
                                   userInfo: nil)
         addTrackingArea(area)
@@ -157,6 +157,7 @@ final class OpenBotMirrorSurface: NSView {
     func displayFrame(_ image: CGImage, viewportWidth: Double, viewportHeight: Double) {
         deviceWidth = viewportWidth
         deviceHeight = viewportHeight
+        currentFrame = image
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         layer?.contents = image
@@ -216,12 +217,10 @@ final class OpenBotMirrorSurface: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         let point = cssPoint(from: event)
-        let deltaY = event.hasPreciseScrolling
-            ? event.scrollingDeltaY * 0.1
-            : event.scrollingDeltaY * 40
-        let deltaX = event.hasPreciseScrolling
-            ? event.scrollingDeltaX * 0.1
-            : event.scrollingDeltaX * 40
+        // Line-based wheels report single lines; trackpads report points.
+        let scale: CGFloat = abs(event.scrollingDeltaY) < 4 ? 40 : 1
+        let deltaY = event.scrollingDeltaY * scale
+        let deltaX = event.scrollingDeltaX * scale
         service?.sendMouseEvent("mouseWheel", x: point.x, y: point.y, button: "none",
                                 deltaX: Double(deltaX), deltaY: Double(deltaY))
     }
@@ -252,7 +251,7 @@ final class OpenBotMirrorSurface: NSView {
         if modifiers.intersection([.command, .control, .option]).isEmpty,
            let characters = event.characters, !characters.isEmpty,
            let scalar = characters.unicodeScalars.first,
-           scalar.value >= 32, !scalar.properties.isGraphemeBaseOnly || scalar.value == 32 {
+           scalar.value >= 32, scalar.value < 0xF700 {
             service.insertText(characters)
             return
         }

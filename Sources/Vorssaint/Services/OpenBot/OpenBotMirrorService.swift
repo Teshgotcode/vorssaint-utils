@@ -5,6 +5,7 @@ import AppKit
 import Carbon.HIToolbox
 import Foundation
 import ImageIO
+import SwiftUI
 
 /// The OpenBot window in Vorssaint's frame. OpenBot is an Electron app whose
 /// renderer only lives inside its own process, so the window shows the real
@@ -179,7 +180,7 @@ final class OpenBotMirrorService: NSObject, ObservableObject, NSWindowDelegate {
         guard let panel, panel.isVisible else { return }
         let frame = panel.frame
         guard let screen = NSScreen.screens.first(where: {
-            $0.frame.contains(x: frame.midX, y: frame.midY)
+            $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
         }) ?? NSScreen.main else { return }
         let topLeftX = frame.minX
         // AppleScript counts from the screen's top; AppKit from its bottom.
